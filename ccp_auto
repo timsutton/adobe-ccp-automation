@@ -33,7 +33,7 @@ PACKAGES = [
     ('PRLD', '5.0.0'),
     ]
 
-OUTPUT_DIR = "~/Desktop/CC"
+OUTPUT_DIR = "~/Desktop"
 
 TEMPLATE_XML = """<CCPPackage>
   <CreatePackage>
