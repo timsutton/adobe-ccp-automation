@@ -1,0 +1,132 @@
+#!/usr/bin/python
+
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import urllib2
+
+from distutils.version import LooseVersion as LV
+from pprint import pprint
+from string import Template
+from xml.etree import ElementTree
+
+# Let's try a manifest of (SAPCode, BaseVersion) pairs for HD installers
+# Note there is zero sanity checking for whether these are HD! RIBS won't work!
+PACKAGES = [
+    ('AEFT', '13.8.0'),
+    ('AEFT', '14.0.0'),
+    ('AME', '10.3.0'),
+    ('AME', '11.0.0'),
+    ('AUDT', '9.2.0'),
+    ('AUDT', '10.0.0'),
+    ('DRWV', '17.0.0'),
+    ('FLPR', '16.0'),
+    ('KBRG', '6.3'),
+    ('ILST', '20.0.0'),
+    ('ILST', '21.0.0'),
+    ('PHSP', '17.0'),
+    ('PHSP', '18.0'),
+    ('PPRO', '10.3.0'),
+    ('PPRO', '11.0.0'),
+    ('PRLD', '5.0.0'),
+    ]
+
+OUTPUT_DIR = "~/Desktop/CC"
+
+TEMPLATE_XML = """<CCPPackage>
+  <CreatePackage>
+    <packageName>${package_name}</packageName>
+    <packagingJobId>12345</packagingJobId>
+    <outputLocation>${output_location}</outputLocation>
+    <is64Bit>true</is64Bit>
+    <customerType>enterprise</customerType>
+    <organizationName>Concordia University, Quebec</organizationName>
+
+    <!-- ProductCategory should be left 'Custom' -->
+    <ProductCategory>Custom</ProductCategory>
+
+    <matchOSLanguage>true</matchOSLanguage>
+	<IncludeUpdates>false</IncludeUpdates>
+	<rumEnabled>true</rumEnabled>
+	<updatesEnabled>false</updatesEnabled>
+	<appsPanelEnabled>false</appsPanelEnabled>
+	<adminPrivilegesEnabled>false</adminPrivilegesEnabled>
+    <Language>
+      <id>en_US</id>
+    </Language>
+	<Products>
+		<Product>
+			<sapCode>${sap_code}</sapCode>
+			<version>${version}</version>
+		</Product>
+	</Products>
+  </CreatePackage>
+</CCPPackage>
+"""
+
+
+URL = 'https://prod-rel-ffc-ccm.oobesaas.adobe.com/adobe-ffc-external/core/v4/products/all?&channel=ccm&channel=sti&platform=osx10&platform=osx10-64&payload=true&productType=Desktop&_type=json'
+req = urllib2.Request(URL, headers={
+    'User-Agent': 'Creative Cloud',
+    'x-adobe-app-id': 'AUSST_4_0',
+    })
+data = json.loads(urllib2.urlopen(req).read())
+ccm_data = {}
+for channel in data['channel']:
+    if channel['name'] == 'ccm':
+        ccm_data.update(channel)
+
+# Yes, the products dict has one key, 'product', which is an array
+print "Product list:"
+print
+for prod in ccm_data['products']['product']:
+    print "%s - %s - %s" % (prod['displayName'], prod['id'], prod['version'])
+
+manifests = []
+# It would be more efficient to iterate through the entire set once
+for pkg in PACKAGES:
+    sap, base_version = pkg[0], pkg[1]
+    matching_prods = []
+    for prod in ccm_data['products']['product']:
+        if prod['id'] != sap:
+            continue
+        # baseVersion may not exist for some obscure entries like AdobeSetup
+        if prod['platforms']['platform'][0]['languageSet'][0].get('baseVersion') == base_version:
+            matching_prods.append(prod)
+
+    # Now sort products by 'version' descending
+    newest_product = sorted(matching_prods, key=lambda k: LV(k['version']), reverse=True)[0]
+    # pprint(newest_product)
+    manifests.append({
+        'sap_code': newest_product['id'],
+        'version': newest_product['version'],
+        'display_name': newest_product['displayName'],
+        'minimum_os_version': newest_product['platforms']['platform'][0]['systemCompatibility']['operatingSystem']['range'][0].split('-')[0],
+        }
+    )
+
+pprint(manifests)
+
+output_dir = os.path.expanduser(OUTPUT_DIR)
+
+for manifest in manifests:
+    # should probably normalize the pkg name to something without spaces, parens
+    pkg_name = manifest['display_name']
+    if os.path.exists(os.path.join(output_dir, pkg_name)):
+        shutil.rmtree(os.path.join(output_dir, pkg_name))
+    xml_data = Template(TEMPLATE_XML).safe_substitute(
+                package_name=pkg_name,
+                output_location=output_dir,
+                sap_code=manifest['sap_code'],
+                version=manifest['version'])
+    (xml_fd, xml_path) = tempfile.mkstemp()
+    os.write(xml_fd, xml_data)
+    cmd = ['/Applications/Utilities/Adobe Application Manager/core/Adobe Application Manager.app/Contents/MacOS/PDApp',
+           '--appletID=CCP_UI',
+           '--appletVersion=1.0',
+           '--workflow=ccp',
+           '--automationMode=ccp_automation',
+           '--pkgConfigFile=%s' % xml_path]
+    subprocess.call(cmd)
